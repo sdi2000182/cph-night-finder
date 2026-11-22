@@ -1,0 +1,24 @@
+# Rebuilds the page every day at 06:00 UTC (RA/Dukop block browser requests, so it's built server-side)
+name: build page
+on:
+  schedule: [{cron: "0 6 * * *"}]
+  workflow_dispatch:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: {name: github-pages, url: "${{ steps.d.outputs.page_url }}"}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: mkdir site && python cph_events.py --days 30 --html site/index.html
+      - uses: actions/upload-pages-artifact@v3
+        with: {path: site}
+      - id: d
+        uses: actions/deploy-pages@v4
