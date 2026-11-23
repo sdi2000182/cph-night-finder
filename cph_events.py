@@ -25,6 +25,7 @@ TAGS = {
 FREE = (r"free (entry|entrance|admission|event|party|of charge)|(entry|entrance|admission)\W+free|"
         r"\bgratis\b|donation|pay what you|pwyc|sliding scale|no entry fee|fri entré")
 PRICE = r"(\d{2,4})\s*(?:kr|dkk|,-)|(?:kr\.?|dkk)\s*(\d{2,4})"
+NOT_ENTRY = r"locker|garderobe|cloak|wardrobe|jacket|drink|beer|\bøl\b|cocktail|shot|merch|pant\b|deposit|food|mad\b"
 EN = r"\b(the|and|with|join|us|we|you|will|for|our|night|this)\b"
 DA = r"\b(og|med|vi|til|på|det|er|af|kom|vores|en|der)\b"
 CPH = r"københavn|kbh|copenhagen|frederiksberg|valby|vanløse|amager|christiania|\b[12]\d{3}\b"
@@ -53,6 +54,7 @@ def dukop(now, end):
 def ra(now, end):
     q = """query($f: FilterInputDtoInput, $p: Int){ eventListings(filters:$f, pageSize:100, page:$p){
       totalResults data{ event{ title startTime endTime content cost contentUrl
+      tickets(queryType:AVAILABLE){ title priceRetail }
       venue{name} genres{name} artists{name} } } } }"""
     page, seen = 1, 0
     while True:
@@ -67,7 +69,11 @@ def ra(now, end):
             local = lambda s: s and datetime.fromisoformat(s[:19]).replace(tzinfo=CPH_TZ)
             extra = " ".join(g["name"] for g in e.get("genres") or []) + " " + \
                     " ".join(a["name"] for a in e.get("artists") or [])
-            yield dict(src="ra", title=e["title"], desc=f"{e.get('content') or ''}\n{extra}", cost=e.get("cost") or "",
+            # real prices: RA ticket tiers (minus sold out) + the organiser's cost field
+            prices = [round(t["priceRetail"]) for t in e.get("tickets") or []
+                      if t.get("priceRetail") is not None and "sold out" not in (t.get("title") or "").lower()]
+            prices += [int(n) for n in re.findall(r"\d+", e.get("cost") or "")]
+            yield dict(src="ra", title=e["title"], desc=f"{e.get('content') or ''}\n{extra}", prices=prices,
                        loc=(e.get("venue") or {}).get("name", ""), url="https://ra.co" + e["contentUrl"],
                        start=local(e["startTime"]), stop=local(e.get("endTime")))
         seen += len(lst["data"])
@@ -81,14 +87,14 @@ def analyse(ev):
     tags = [t for t, rx in TAGS.items() if re.search(rx, blob)]
     if ev["src"] == "ra" and "techno" not in tags:
         tags.insert(0, "techno")  # everything on RA is a club/music event
-    if ev.get("cost", "").strip():  # RA's own price field beats guessing from text
-        prices = [int(n) for n in re.findall(r"\d+", ev["cost"])]
-        free = prices == [0] or "free" in ev["cost"].lower()
-    else:
-        prices = [int(a or b) for a, b in re.findall(PRICE, blob)]
-        free = bool(re.search(FREE, blob))
+    # RA ticket/cost prices + entry prices in the text (skipping locker/drink lines)
+    prices = (ev.get("prices") or []) + [
+        int(a or b) for line in blob.splitlines() if not re.search(NOT_ENTRY, line)
+        for a, b in re.findall(PRICE, line)]
+    # "free entry until 22:00, 75 kr after" -> not free for a late arrival, so prices win
+    free = max(prices) == 0 if prices else bool(re.search(FREE, blob))
     lang = "EN" if len(re.findall(EN, blob)) >= len(re.findall(DA, blob)) else "DA"
-    return tags, free, min(prices) if prices else None, lang
+    return tags, free, (min(prices), max(prices)) if prices else None, lang
 
 
 def main():
@@ -118,11 +124,13 @@ def main():
             if not a.any_time and not (loc_start.weekday() >= 4 and late):
                 continue
             tags, free, price, lang = analyse(ev)
-            if not tags or (price and price > a.max_price and not free):
+            # filter on the highest price: arriving late usually means the late/all-night price
+            if not tags or (price and price[1] > a.max_price and not free):
                 continue
             # ponytail: keyword heuristic; pick = a party AND queer/arabic AND English.
             pick = bool("techno" in tags and set(tags) & {"queer", "arabic"} and lang == "EN")
-            cost = "FREE" if free else (f"{price} kr" if price else "price?")
+            cost = ("FREE" if free else "price?" if not price else
+                    f"{price[0]} kr" if price[0] == price[1] else f"{price[0]}–{price[1]} kr")
             hits.append(dict(ev=ev, tags=tags, cost=cost, lang=lang, pick=pick, when=loc_start))
     hits.sort(key=lambda h: h["when"])
 
